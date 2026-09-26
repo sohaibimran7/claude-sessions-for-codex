@@ -1,4 +1,4 @@
-# codex-claude-bridge
+# claude-sessions-for-codex
 
 Lets an OpenAI Codex thread, including Codex live (voice) mode, orchestrate Claude Code chats on the same Mac: list them, read them, message them, start new ones, and get their results back. It uses only the Python standard library.
 
@@ -25,12 +25,12 @@ A chat can be referred to by its session id, its desktop-app id (`local_…`), o
 ```bash
 # 1. Claude Code Stop hook (add to ~/.claude/settings.json, alongside any existing hooks)
 #    {"hooks": {"Stop": [{"hooks": [{"type": "command",
-#       "command": "python3 \"$HOME/codex-claude-bridge/stop_hook.py\"", "async": true, "timeout": 10}]}]}}
+#       "command": "python3 \"$HOME/claude-sessions-for-codex/stop_hook.py\"", "async": true, "timeout": 10}]}]}}
 
 # 2. Codex MCP server (append to ~/.codex/config.toml, using absolute paths)
 #    [mcp_servers.claude_sessions]
 #    command = "/usr/local/bin/python3"
-#    args = ["/Users/<you>/codex-claude-bridge/claude_sessions_mcp.py"]
+#    args = ["/Users/<you>/claude-sessions-for-codex/claude_sessions_mcp.py"]
 #    startup_timeout_sec = 30
 #    tool_timeout_sec = 180
 #    [mcp_servers.claude_sessions.env]
@@ -66,7 +66,7 @@ Everything was checked in September 2026.
 
 | Tool | Usable from Codex desktop / live mode | Messages your **existing, open** Claude chats | Messages **closed** chats | Reads chat **history** | Starts new chats | Results back to the orchestrator | Reporting doesn't rely on the model | License · maturity |
 |---|---|---|---|---|---|---|---|---|
-| **codex-claude-bridge** (this) | ✅ MCP | ✅ native inbox | ✅ background resume | ✅ | ✅ background | ✅ pull (`claude_wait`) | ✅ Stop hook | none yet · new, tested on this Mac |
+| **claude-sessions-for-codex** (this) | ✅ MCP | ✅ native inbox | ✅ background resume | ✅ | ✅ background | ✅ pull (`claude_wait`) | ✅ Stop hook | none yet · new, tested on this Mac |
 | [antiphon](https://github.com/moiri-gamboni/antiphon) | ⚠️ via its CLI; desktop threads can't be peers, since the desktop app runs a private Codex engine | ✅ native inbox | ❌ | ❌ | ✅ with approvals forwarded to Codex | ✅ push to Codex threads on the shared daemon (not desktop) · `wait` for its own sessions | ✅ | AGPL-3.0 · young, 0 stars |
 | [claude-code-messaging](https://github.com/samsonjs/claude-code-messaging)\* | ✅ Codex skill (shell) | ✅ native inbox | ❌ | ❌ | ❌ | ✅ pull from a persistent reply inbox | ❌ depends on the chat replying | none · 1 commit, 0 stars |
 | [Orchestra-MCP](https://github.com/ngoclinh93qt/Orchestra-MCP)\* | ✅ MCP | ❌ runs its own tasks only | ❌ | ✅ Claude **and** Codex history | ✅ supervised tasks | ✅ pull (`agent_output`) | ✅ | all rights reserved · 1 star |
