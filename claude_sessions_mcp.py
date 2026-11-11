@@ -9,6 +9,9 @@ Routing for claude_send:
     through that socket; it arrives between tool calls, or starts a turn if the chat is idle.
   * closed chat -> a background `claude -p --resume <id>` run. Never both: resuming a chat
     that is running elsewhere would interleave two writers in one transcript.
+  Optional `model` / `effort` become `--model` / `--effort` on background runs (closed chats and
+  claude_start_session). For an open chat they are an error before anything is sent: the inbox
+  only carries messages and cannot change the running process's settings.
 
 Reports come from stop_hook.py, a Claude Code Stop hook that appends the final message of
 every watched chat to events.jsonl; claude_wait returns new events with short timeouts so a
@@ -38,6 +41,8 @@ DESKTOP_INDEX = HOME / "Library/Application Support/Claude/claude-code-sessions"
 SENDER_NAME = os.environ.get("CLAUDE_BRIDGE_NAME", "Codex orchestrator")
 PROTOCOL_VERSION = "2025-06-18"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # `claude --effort` values (Claude Code 2.1.294)
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,199}$")  # aliases and full ids, no flags/whitespace
 
 
 # --------------------------------------------------------------------------- helpers
@@ -396,6 +401,56 @@ def spawn_headless(args: list[str], cwd: str, session_id: str, label: str) -> di
     return {"route": "headless", "job": job, "note": "running in the background; claude_wait reports when it finishes"}
 
 
+# --------------------------------------------------------------------------- model / effort
+
+def selection_args(a: dict) -> tuple[list[str], dict]:
+    """Validate optional `model` and `effort` inputs.
+
+    Returns (extra CLI flags, requested-settings metadata). Both are empty when neither key is
+    given, so the CLI keeps its own defaults. Anything else that is not a usable value (null,
+    empty, non-string, unknown effort level, flag-like model) is an error: the bridge never
+    substitutes a default for a value the caller tried to set."""
+    flags: list[str] = []
+    requested: dict = {}
+    if "model" in a:
+        model = a["model"]
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string such as 'fable', 'opus', 'sonnet' or a full model "
+                             "name; omit it to use the CLI's default")
+        model = model.strip()
+        if not MODEL_RE.match(model):
+            raise ValueError(f"model {model!r} is not a valid model alias or name (letters, digits, . _ : / @ [ ] -; "
+                             "no spaces or leading '-')")
+        flags += ["--model", model]
+        requested["model"] = model
+    if "effort" in a:
+        effort = a["effort"]
+        if not isinstance(effort, str) or not effort.strip():
+            raise ValueError(f"effort must be one of {', '.join(EFFORT_LEVELS)}; omit it to use the CLI's default")
+        effort = effort.strip().lower()
+        if effort not in EFFORT_LEVELS:
+            raise ValueError(f"effort {a['effort']!r} is not one of {', '.join(EFFORT_LEVELS)}")
+        flags += ["--effort", effort]
+        requested["effort"] = effort
+    return flags, requested
+
+
+REQUESTED_STATUS = "passed to claude as --model/--effort flags; the CLI validates them, so this is the request, not " \
+                   "confirmation of what ran (a rejected value shows up as a job_failed report in claude_wait)"
+
+
+def reject_live_override(r: dict, requested: dict) -> None:
+    """An open chat's inbox only carries messages; it cannot change that process's settings."""
+    if r["_live"] and requested:
+        what = " and ".join(f"{k} {v!r}" for k, v in requested.items())
+        raise ValueError(
+            f"{r['title']} ({r['session_id']}) is {r['state']}: {what} cannot be applied to a chat that is already "
+            "running, and nothing was sent. Its inbox only delivers messages; it cannot change the model or effort "
+            "of the running process, and the bridge will not restart it or resume it in parallel. Either send the "
+            "message without model/effort to use the chat's current settings, start a new chat with "
+            "claude_start_session, or wait until the chat is closed and resume it with model/effort.")
+
+
 # --------------------------------------------------------------------------- tools
 
 def t_list(a: dict) -> str:
@@ -431,6 +486,8 @@ def t_read(a: dict) -> str:
 def t_send(a: dict) -> str:
     r = resolve(a["session"])
     text = a["message"]
+    flags, requested = selection_args(a)  # validated before anything is watched, sent or started
+    reject_live_override(r, requested)
     watch(r["session_id"])
     if r["_live"]:
         res = send_live(r["_live"], text)
@@ -439,8 +496,10 @@ def t_send(a: dict) -> str:
             raise ValueError("that chat has no transcript to resume")
         mode = a.get("permission_mode") or "auto"
         args = [claude_bin(), "-p", "--resume", r["session_id"], "--output-format", "json",
-                "--permission-mode", mode, text]
+                "--permission-mode", mode, *flags, text]
         res = spawn_headless(args, r["cwd"] or str(HOME), r["session_id"], r["title"])
+        if requested:
+            res["requested"] = dict(requested, status=REQUESTED_STATUS)
     res.update(chat=r["title"], session_id=r["session_id"])
     return json.dumps(res)
 
@@ -449,12 +508,15 @@ def t_start(a: dict) -> str:
     cwd = os.path.expanduser(a.get("cwd") or str(HOME))
     if not os.path.isdir(cwd):
         raise ValueError(f"folder does not exist: {cwd}")
+    flags, requested = selection_args(a)
     sid = str(uuid.uuid4())
     title = a.get("title") or " ".join(a["prompt"].split())[:60]
     watch(sid)
     args = [claude_bin(), "-p", "--session-id", sid, "--name", title, "--output-format", "json",
-            "--permission-mode", a.get("permission_mode") or "auto", a["prompt"]]
+            "--permission-mode", a.get("permission_mode") or "auto", *flags, a["prompt"]]
     res = spawn_headless(args, cwd, sid, title)
+    if requested:
+        res["requested"] = dict(requested, status=REQUESTED_STATUS)
     res.update(session_id=sid, title=title, cwd=cwd)
     return json.dumps(res)
 
@@ -522,14 +584,24 @@ TOOLS = {
         "session": {"type": "string", "description": "session id, desktop id, or unique title fragment"},
         "message": {"type": "string"},
         "permission_mode": {"type": "string", "enum": ["auto", "acceptEdits", "manual", "dontAsk", "plan"],
-                            "description": "closed chats only: mode for the background run (default auto)"}},
+                            "description": "closed chats only: mode for the background run (default auto)"},
+        "model": {"type": "string", "description": "closed chats only: model for the background resume, an alias "
+                                                   "('fable', 'opus', 'sonnet') or full model name; omit to keep "
+                                                   "the CLI default. Rejected (nothing sent) if the chat is open."},
+        "effort": {"type": "string", "enum": list(EFFORT_LEVELS),
+                   "description": "closed chats only: effort level for the background resume; omit to keep the CLI "
+                                  "default. Rejected (nothing sent) if the chat is open."}},
                    ["session", "message"]),
     "claude_start_session": (t_start, "Start a new Claude chat in a folder with a first prompt (runs in the background; "
                                       "watched; claude_wait returns its reply).", {
         "cwd": {"type": "string", "description": "project folder"},
         "prompt": {"type": "string"},
         "title": {"type": "string"},
-        "permission_mode": {"type": "string", "enum": ["auto", "acceptEdits", "manual", "dontAsk", "plan"]}},
+        "permission_mode": {"type": "string", "enum": ["auto", "acceptEdits", "manual", "dontAsk", "plan"]},
+        "model": {"type": "string", "description": "model for the new chat, an alias ('fable', 'opus', 'sonnet') or "
+                                                   "full model name; omit to use the CLI default"},
+        "effort": {"type": "string", "enum": list(EFFORT_LEVELS),
+                   "description": "effort level for the new chat; omit to use the CLI default"}},
                              ["prompt"]),
     "claude_watch": (t_watch, "Start or stop receiving end-of-turn reports from a Claude chat.", {
         "session": {"type": "string"}, "on": {"type": "boolean", "default": True}}, ["session"]),
